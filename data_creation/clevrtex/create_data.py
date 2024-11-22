@@ -10,9 +10,11 @@ import shutil
 
 import numpy as np
 
+sys.path.append('.')
 from macros import *
 from collections import Counter
 from rule import apply_rule
+import clevr_qa
 
 """
 This file expects to be run from Blender like this:
@@ -42,12 +44,12 @@ if INSIDE_BLENDER:
 parser = argparse.ArgumentParser()
 
 # Input options
-parser.add_argument('--base_scene_blendfile', default='data/scene.blend',
+parser.add_argument('--base_scene_blendfile', default='./data/scene.blend',
                     help="Base blender file on which all scenes are based; includes " +
                          "ground plane, lights, and camera.")
-parser.add_argument('--shape_dir', default='data/shapes',
+parser.add_argument('--shape_dir', default='./data/shapes',
                     help="Directory where .blend files for object models are stored")
-parser.add_argument('--material_dir', default='data/materials',
+parser.add_argument('--material_dir', default='./data/materials_new',
                     help="Directory where .blend files for materials are stored")
 parser.add_argument('--shape_color_combos_json', default=None,
                     help="Optional path to a JSON file mapping shape names to a list of " +
@@ -56,7 +58,7 @@ parser.add_argument('--shape_color_combos_json', default=None,
 
 
 # Rendering options
-parser.add_argument('--use_gpu', default=1, type=int,
+parser.add_argument('--use_gpu', default=0, type=int,
                     help="Setting --use_gpu 1 enables GPU-accelerated rendering using CUDA. " +
                          "You must have an NVIDIA GPU with the CUDA toolkit installed for " +
                          "to work.")
@@ -96,14 +98,24 @@ parser.add_argument('--min_pixels_per_object', default=100, type=int,
          "occluded by other objects.")
 
 # Output options
-parser.add_argument('--save_path', default='output/')
-parser.add_argument('--bind_path', default='precomputed_binds/binds.json')
+parser.add_argument('--start_idx', default=0, type=int,
+    help="The index at which to start for numbering rendered images. Setting " +
+         "this to non-zero values allows you to distribute rendering across " +
+         "multiple machines and recombine the results later.")
+parser.add_argument('--save_path', default='./output/')
+parser.add_argument('--bind_path', default='./precomputed_binds/core_binds.json')
 
 parser.add_argument('--num_samples', type=int, default=80)
 
 parser.add_argument('--rule', default='none')
 
 parser.add_argument('--no_target', default=False, action='store_true')
+
+# Debugging/Test options
+parser.add_argument('--test_scan', default=False, action='store_true',
+                    help='Rather than sampling, generate a series of test scenes'
+                            'by finding a object placement where all different objects are visible'
+                            'and sweeping through all materials.')
 
 argv = utils.extract_args()
 args = parser.parse_args(argv)
@@ -114,14 +126,18 @@ def render_scene(num_objects,
                  target_positions, target_rotations, target_shapes, target_sizes, target_materials,
                  args,
                  output_dir='path/to/dir',
-                 target=True
+                 target=True,
+                 sample_id=None
                  ):
+    # Define sample id str
+    sample_id_str = f'_{sample_id}' if sample_id is not None else ''
 
     # Load the main blendfile
     bpy.ops.wm.open_mainfile(filepath=args.base_scene_blendfile)
 
     # Load materials
-    utils.load_materials(args.material_dir)
+    #utils.load_materials(args.material_dir)
+    #print(f'Material dir is: {args.material_dir}')
 
     # Set render arguments so we can get pixel coordinates later.
     # We use functionality specific to the CYCLES renderer so BLENDER_RENDER
@@ -152,9 +168,12 @@ def render_scene(num_objects,
     bpy.context.scene.cycles.transparent_max_bounces = args.render_max_bounces
 
     # Add material to ground
+    #print(f'All materials are: {MATERIALS}')
     ground = bpy.data.objects['Ground']
     ground_mat = random.choice(MATERIALS)
+    #print(f'The ground material is: {ground_mat}')
     ground_mat_blender = utils.add_material(ground, ground_mat)
+    #print(f'The ground material blender is: {ground_mat_blender}')
 
     def rand(L):
         return 2.0 * L * (random.random() - 0.5)
@@ -177,17 +196,22 @@ def render_scene(num_objects,
         for i in range(3):
             bpy.data.objects['Lamp_Fill'].location[i] += rand(args.fill_light_jitter)
 
+    # Save directions for qa
+    directions = clevr_qa.compute_directions()
+
     # Now add source objects
+    #print(f'The source shapes are: {source_shapes}')
+    #print(f'The source materials are: {source_materials}')
     objects, blender_objects, blender_materials = add_objects(num_objects,
                                            source_positions, source_rotations, source_shapes, source_sizes, source_materials,
                                            args, camera)
 
-    all_visible = make_mask_and_check_visibility([ground] + blender_objects, [ground_mat_blender] + blender_materials, args.min_pixels_per_object, os.path.join(output_dir, 'source_mask.png'))
+    all_visible = make_mask_and_check_visibility([ground] + blender_objects, [ground_mat_blender] + blender_materials, args.min_pixels_per_object, os.path.join(output_dir, f'mask{sample_id_str}.png'))
     if not all_visible:
         return False
 
     # Render the scene and dump the scene data structure
-    render_args.filepath = os.path.join(output_dir, 'source.png')
+    render_args.filepath = os.path.join(output_dir, f'image{sample_id_str}.png')
     while True:
         try:
             bpy.ops.render.render(write_still=True)
@@ -198,13 +222,17 @@ def render_scene(num_objects,
     scene_struct = {
         'image_filename': os.path.basename(output_dir),
         'objects': objects,
-        'ground_material': ground_mat,
+        'directions': directions,
+        'ground_material': MATERIALS_MAP[ground_mat],
         'Lamp_Key': list(bpy.data.objects['Lamp_Key'].location),
         'Lamp_Back': list(bpy.data.objects['Lamp_Back'].location),
         'Lamp_Fill': list(bpy.data.objects['Lamp_Fill'].location),
         'Camera': list(bpy.data.objects['Camera'].location),
     }
-    with open(os.path.join(output_dir, 'source.json'), 'w') as f:
+
+    scene_struct['relationships'] = clevr_qa.compute_all_relationships(scene_struct)
+
+    with open(os.path.join(output_dir, f'properties{sample_id_str}.json'), 'w') as f:
         json.dump(scene_struct, f, indent=2)
 
     if target:
@@ -279,9 +307,10 @@ def add_objects(num_objects, positions, rotations, shapes, sizes, materials, arg
         # Record data about the object in the scene data structure
         pixel_coords = utils.get_camera_coords(camera, obj.location)
         objects.append({
+            'index': i,
             'shape': shape,
-            'size': size,
-            'material': material,
+            'size': SIZES_MAP[str(size)],
+            'material': MATERIALS_MAP[material],
             '3d_coords': tuple(obj.location),
             'rotation': theta,
             'pixel_coords': pixel_coords,
@@ -337,6 +366,7 @@ def render_shadeless(blender_objects, blender_materials, path='flat.png'):
     render_args.filepath = path
 
     # Add random shadeless materials to all objects
+    print(f'The number of objects is: {len(blender_objects)}')
     undo_material_things = []
     for i, (obj, mat) in enumerate(zip(blender_objects, blender_materials)):
         undo_material_things.append(utils.set_to_shadeless(mat, MASK_COLORS[i]))
@@ -371,19 +401,25 @@ if __name__ == '__main__':
 
     # Dump Set
     save_path = args.save_path
-    temp_path = os.path.join(args.save_path, '..', 'TEMP')
+    temp_path = os.path.join(args.save_path, 'TEMP')
     os.makedirs(save_path, exist_ok=True)
     os.makedirs(temp_path, exist_ok=True)
 
+    # Add chunking to prevent laggy directory navigation!!!
+
     done = 0
     while True:
-        sample_label = random.randint(0, 10 ** 16)
-        sample_dir = "{:018d}".format(sample_label)
+        sample_label = args.start_idx + done #random.randint(0, 10 ** 16)
+        sample_dir = "{:06d}".format(sample_label)
         sample_path = os.path.join(temp_path, sample_dir)
         os.makedirs(sample_path, exist_ok=True)
 
         N = np.random.choice(np.arange(args.min_objects, args.max_objects + 1))
         object_binds = [random.choice(binds) for _ in range(N)]
+
+        # If doing a test scan replace all materials with current material sweep
+        if args.test_scan:
+            object_binds = [[b[0], b[1], done] for b in object_binds]
 
         x = np.random.uniform(-3, 3, (N, 2))
         while True:
@@ -404,7 +440,8 @@ if __name__ == '__main__':
                      t_obj_positions, t_obj_rotations, t_obj_shapes, t_obj_sizes, t_obj_materials,
                      args=args,
                      output_dir=sample_path,
-                     target=not args.no_target):
+                     target=not args.no_target,
+                     sample_id=sample_dir):
             success = False
         else:
             success = True
@@ -412,7 +449,15 @@ if __name__ == '__main__':
         if not success:
             shutil.rmtree(sample_path, ignore_errors=True)
         else:
-            shutil.move(sample_path, os.path.join(save_path, sample_dir))
+            #shutil.move(sample_path, save_path)
+            for filename in os.listdir(sample_path):
+                file_source = os.path.join(sample_path, filename)
+                file_destination = os.path.join(save_path, filename)
+                
+                # Check if it's a file (and not a directory)
+                if os.path.isfile(file_source):
+                    shutil.move(file_source, file_destination)
+
             done += 1
 
         if done >= args.num_samples:

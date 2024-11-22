@@ -3,8 +3,8 @@ from macros import *
 
 def apply_rule(object_binds, x, N, rule):
         
-    # angle
-    angle = np.zeros(N)
+    # Add random angle
+    angle = np.random.random(N) * 360.0
 
     s_obj_positions, t_obj_positions = [], []
     s_obj_rotations, t_obj_rotations = [], []
