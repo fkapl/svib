@@ -1,0 +1,10 @@
+name: clevrtex
+channels:
+  - conda-forge
+  - nodefaults
+dependencies:
+  - python=3.7.10
+  - pillow=8.2.0
+  - pip
+  - pip:
+    - colorcorrect==0.9.1

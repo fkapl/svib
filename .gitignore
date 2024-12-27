@@ -1,0 +1,19 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+containers/miniconda3/
+containers/blender/
+
+data_creation/clevrtex/output*/
+data_creation/clevrtex/slurm_log/
+data_creation/clevrtex_original/output*/
+*/output*/
+slurm_log/
+
+# blend files are too large
+shapes/
+materials/
+materials_final/
+materials_new/

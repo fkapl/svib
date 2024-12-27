@@ -325,3 +325,43 @@ def undo_shadeless(mat, temp_link, socket, output_node, links, nodes):
         mat.node_tree.links.remove(l)
     for n in nodes:
         mat.node_tree.nodes.remove(n)
+
+# From CLEVRTEX-GENERATION
+def compositor_output(out_socket, node_tree, output_path_prefix, set_bw=False, mkdir=True, frame_id=1):
+    out_dir = Path(output_path_prefix).parent
+    if mkdir:
+        out_dir.mkdir(parents=True, exist_ok=True)
+    elif not out_dir.exists() or not out_dir.is_dir():
+        raise RuntimeError(f'Cannot output to {out_dir}')
+
+    out_name = Path(output_path_prefix).name
+
+    output_node = node_tree.nodes.new('CompositorNodeOutputFile')
+    output_node.base_path = str(out_dir)
+    output_node.file_slots[0].path = str(out_name)
+
+    if set_bw:
+        output_node.format.color_mode = 'BW'
+        output_node.file_slots[0].format.color_mode = 'BW'
+
+    node_tree.links.new(
+        out_socket,
+        output_node.inputs['Image']
+    )
+    return out_dir / f"{out_name}{frame_id:0>4d}.png"
+
+
+def compositor_obj_mask_output(out_socket, node_tree, obj_index, output_path_prefix, mkdir=True, frame_id=1):
+    id_mask_node = node_tree.nodes.new('CompositorNodeIDMask')
+    id_mask_node.index = obj_index
+    id_mask_node.use_antialiasing = False
+    node_tree.links.new(
+        out_socket,
+        id_mask_node.inputs['ID value']
+    )
+    output_path_prefix = str(output_path_prefix)
+    if output_path_prefix.endswith('.png'):
+        output_path_prefix = output_path_prefix[:-4]
+    output_path_prefix += f'_o{obj_index:0>2d}_'
+    return compositor_output(id_mask_node.outputs['Alpha'], node_tree, output_path_prefix, set_bw=True, mkdir=mkdir,
+                             frame_id=frame_id)
